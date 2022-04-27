@@ -1,0 +1,179 @@
+import numpy as np
+import tensorflow as tf
+import random
+# from maze_env import Maze
+import gym
+import matplotlib.pyplot as plt
+class DeepQNetwork:
+    def __init__(self,n_actions,memory_size,batch_size,n_features,epsilon=0.9,gamma=0.9,epsilon_increment=0.02):
+        self.n_actions=n_actions#动作个数
+        self.memory_size=memory_size#回放池数据量
+        self.batch_size=batch_size#采样数量
+        self.n_features=n_features#状态数
+        self.memory_buffer=np.zeros((self.memory_size,self.n_features*2+2))
+        self.epsilon=epsilon#epsilon-greedy系数
+        self.gamma=gamma#衰减值
+        self.memory_counter=0#回放池计数器
+        self.step_counter=0#参数替换计数器
+        self.replace_var_iter=10#参数替换周期
+        self.epsilon_increment=epsilon_increment#模拟退火
+        self.loss_his=[]
+        """定义eval_net"""
+        def eval_net():
+            eval_model = tf.keras.Sequential([
+                tf.keras.layers.Dense(128, activation='relu', name='layer1'),
+                # tf.keras.layers.Dense(4, activation='relu', name='layer2'),
+                tf.keras.layers.Dense(n_actions, activation=None)
+            ])
+            eval_model.build(input_shape=[None,n_features])
+            return eval_model
+
+        """定义target_net"""
+        def target_net():
+            target_model = tf.keras.Sequential([
+                tf.keras.layers.Dense(128, activation='relu', name='layer1'),
+                # tf.keras.layers.Dense(4, activation='relu', name='layer2'),
+                tf.keras.layers.Dense(n_actions, activation=None)
+            ])
+            target_model.build(input_shape=[None,n_features])
+            return target_model
+        self.eval_model=eval_net()
+        self.target_model=target_net()
+        # aa=np.array([-0.5,-0.5])
+        # aa=np.expand_dims(aa, axis=0)
+        # print(f'aaaa={self.eval_model(aa)}')
+
+
+    """定义存储记忆"""
+    def store_transition(self,s,a,r,s_):
+        index = self.memory_counter % self.memory_size
+        transition=np.hstack((s, [a, r], s_))
+        self.memory_buffer[index,:]=transition
+        self.memory_counter+=1
+
+    """动作选择"""
+    def choose_action(self,obsevation):
+        obsevation=np.expand_dims(obsevation,axis=0)
+        if np.random.uniform()<self.epsilon:
+            q_eval = self.eval_model.predict(obsevation)
+            # print(q_eval)
+            action=np.argmax(q_eval)
+        else:
+            action=np.random.randint(0,self.n_actions)
+        return action
+    """参数替换"""
+    def replace_variables(self):
+        for eval_weights,target_weights in zip(self.eval_model.trainable_weights,self.target_model.trainable_weights):
+            target_weights.assign(eval_weights)
+        print('target_model parameters replaced')
+        return self.target_model
+    """从回放池采样"""
+    def sample(self):
+        list=[]
+        if self.memory_counter>self.memory_size:
+            for i in range(self.memory_size):
+                list.append(i)
+            sample_index=random.sample(list,self.batch_size)
+        else:
+            for i in range(self.memory_counter):
+                list.append(i)
+            sample_index=random.sample(list,self.batch_size)
+        sample_data=self.memory_buffer[sample_index,:]
+        return sample_data
+    """网络参数更新和计算"""
+    def learn(self,):
+        sample_data=self.sample()
+        eval_train_data=sample_data[:,:self.n_features]
+        target_train_data=sample_data[:,-self.n_features:]
+        if self.step_counter % self.replace_var_iter==0:
+            self.target_model=self.replace_variables()
+        if self.epsilon<1:
+            if self.step_counter%100==0:
+                self.epsilon+=self.epsilon_increment#更新epsilon值，让greedy策略更加趋近最大值
+        q_eval=self.eval_model.predict(eval_train_data)
+        q_next=self.target_model.predict(target_train_data)
+        # q_eval=q_eval.numpy()
+        # q_next=q_next.numpy()
+        q_target=q_eval.copy()
+        batch_index_list=np.arange(self.batch_size)
+        eval_act_index_list=sample_data[:,self.n_features].astype(int)#不加astye的话输出的是浮点数
+        reward=sample_data[:,self.n_features+1]
+        q_next_max=np.max(q_next,axis=1)
+        q_target[batch_index_list,eval_act_index_list]=reward+self.gamma*q_next_max
+        optimizer = tf.keras.optimizers.SGD(learning_rate=0.001)
+        # q_target=tf.convert_to_tensor(q_target)
+
+        with tf.GradientTape() as tape:
+            q_eval = self.eval_model(eval_train_data)
+            # print(f'qqq={q_eval}')
+            loss = tf.reduce_mean(tf.square(q_target - q_eval))
+            # print(f'loss={loss}')
+        self.loss_his.append(loss)
+        grads = tape.gradient(loss, self.eval_model.trainable_weights)
+        optimizer.apply_gradients(grads_and_vars=zip(grads, self.eval_model.trainable_weights))
+        self.step_counter+=1
+        print(f'step_counter={self.step_counter}')
+
+    def plot_loss(self):
+        plt.plot(np.arange(len(self.loss_his)), self.loss_his)
+        plt.ylabel('Loss')
+        plt.xlabel('training steps')
+        plt.show()
+
+env=gym.make('MountainCar-v0')
+env=env.unwrapped
+print(env.action_space)
+print(env.observation_space)
+RL=DeepQNetwork(n_actions=env.action_space.n,memory_size=10000,batch_size=256,n_features=env.observation_space.shape[0])
+
+def train():
+    step=0
+    for epoch in range(50):
+        print("epoch",epoch)
+        observation = env.reset()
+        while True:
+            env.render()
+            A=RL.choose_action(observation)
+            observation_,reward,done,info=env.step(A)
+            RL.store_transition(observation,A,reward,observation_)
+            if (step>500) and (step%5==0):#回放池积累一定数量记忆后，agent开始学习
+                RL.learn()
+            
+            observation=observation_
+            if done:
+                RL.plot_loss()
+                break
+            step+=1
+    print('game over')
+#     env.destroy()
+# env.after(10,train)
+# env.mainloop()
+train()
+# RL.plot_loss()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        
+
+
+
+
+
+
+
+
